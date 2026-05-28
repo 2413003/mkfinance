@@ -128,6 +128,14 @@ function bindEvents() {
       closeSearch();
     }
   });
+  document.addEventListener("pointermove", (event) => {
+    const chart = event.target.closest("[data-chart-wrap]");
+    if (chart) updateChartHover(event, chart);
+  });
+  document.addEventListener("pointerout", (event) => {
+    const chart = event.target.closest("[data-chart-wrap]");
+    if (chart && !chart.contains(event.relatedTarget)) hideChartHover(chart);
+  });
 
   const searchInput = document.querySelector("#searchInput");
   searchInput.addEventListener("input", (event) => {
@@ -544,7 +552,7 @@ function renderAsset() {
     </div>
     <div class="meta-line">${state.updatedAt ? formatDateTime(state.updatedAt) : ""}</div>
     <div class="range-row">${RANGES.map((range) => `<button class="range ${range === state.range ? "is-active" : ""}" type="button" data-range="${range}">${range.toUpperCase()}</button>`).join("")}</div>
-    <div class="chart-wrap">${history.length > 1 ? chartSvg(history, positive) : `<div class="chart-empty">No chart</div>`}</div>
+    <div class="chart-wrap" data-chart-wrap>${history.length > 1 ? `${chartSvg(history, positive)}${chartHoverMarkup()}` : `<div class="chart-empty">No chart</div>`}</div>
   `;
 }
 
@@ -674,6 +682,76 @@ function chartSvg(points, positive) {
   `;
 }
 
+function chartHoverMarkup() {
+  return `
+    <div class="chart-hover" aria-hidden="true">
+      <div class="chart-crosshair"></div>
+      <div class="chart-point"></div>
+      <div class="chart-tooltip">
+        <strong data-chart-price></strong>
+        <span data-chart-time></span>
+        <span data-chart-change></span>
+      </div>
+    </div>
+  `;
+}
+
+function updateChartHover(event, chart) {
+  const quote = state.quotes.get(state.selected);
+  const points = (quote?.history || []).filter((point) => Number.isFinite(Number(point.price)));
+  if (points.length < 2) {
+    hideChartHover(chart);
+    return;
+  }
+
+  const rect = chart.getBoundingClientRect();
+  const x = clamp(event.clientX - rect.left, 0, rect.width);
+  const xPad = rect.width * (18 / 900);
+  const yPad = rect.height * (18 / 340);
+  const plotWidth = Math.max(1, rect.width - xPad * 2);
+  const ratio = clamp((x - xPad) / plotWidth, 0, 1);
+  const index = Math.round(ratio * (points.length - 1));
+  const point = points[index];
+  const values = points.map((item) => Number(item.price));
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const valueRange = max - min || Math.max(1, max * 0.01);
+  const xPos = xPad + (index / (points.length - 1)) * plotWidth;
+  const yPos = yPad + (1 - (Number(point.price) - min) / valueRange) * (rect.height - yPad * 2);
+  const first = Number(points[0].price);
+  const pointPrice = Number(point.price);
+  const change = pointPrice - first;
+  const changePercent = first ? (change / first) * 100 : 0;
+  const positive = change >= 0;
+  const hover = chart.querySelector(".chart-hover");
+  const crosshair = chart.querySelector(".chart-crosshair");
+  const dot = chart.querySelector(".chart-point");
+  const tooltip = chart.querySelector(".chart-tooltip");
+  const price = chart.querySelector("[data-chart-price]");
+  const time = chart.querySelector("[data-chart-time]");
+  const pointChange = chart.querySelector("[data-chart-change]");
+  if (!hover || !crosshair || !dot || !tooltip || !price || !time || !pointChange) return;
+
+  chart.style.setProperty("--chart-hover-color", positive ? "#0a8f54" : "#d93025");
+  price.textContent = formatMoney(pointPrice);
+  time.textContent = formatPointTime(point.time);
+  pointChange.textContent = `${formatSignedMoney(change)} (${formatSignedPercent(changePercent)})`;
+  pointChange.className = positive ? "is-gain" : "is-loss";
+  crosshair.style.transform = `translateX(${xPos}px)`;
+  dot.style.transform = `translate(${xPos}px, ${yPos}px)`;
+  hover.classList.add("is-visible");
+
+  const tooltipWidth = tooltip.offsetWidth || 142;
+  const tooltipHeight = tooltip.offsetHeight || 70;
+  const tooltipLeft = xPos > rect.width - tooltipWidth - 24 ? xPos - tooltipWidth - 12 : xPos + 12;
+  tooltip.style.left = `${clamp(tooltipLeft, 8, rect.width - tooltipWidth - 8)}px`;
+  tooltip.style.top = `${clamp(yPos - tooltipHeight - 12, 8, rect.height - tooltipHeight - 8)}px`;
+}
+
+function hideChartHover(chart) {
+  chart.querySelector(".chart-hover")?.classList.remove("is-visible");
+}
+
 function sparklineSvg(points, positive) {
   const values = points.map((point) => Number(point.price)).filter(Number.isFinite);
   if (values.length < 8) return "";
@@ -702,13 +780,22 @@ function makePath(points, width, height, padding) {
   };
 }
 
+function clamp(value, min, max) {
+  if (max < min) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
 function formatMoney(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return "--";
+  return formatCurrency(number, Math.abs(number) >= 1 ? 2 : 6);
+}
+
+function formatCurrency(number, maximumFractionDigits) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
-    maximumFractionDigits: Math.abs(number) >= 1 ? 2 : 6,
+    maximumFractionDigits,
   }).format(number);
 }
 
@@ -716,7 +803,8 @@ function formatSignedMoney(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
   const sign = number > 0 ? "+" : number < 0 ? "-" : "";
-  return `${sign}${formatMoney(Math.abs(number))}`;
+  const absolute = Math.abs(number);
+  return `${sign}${formatCurrency(absolute, absolute >= 0.01 ? 2 : 6)}`;
 }
 
 function formatSignedPercent(value) {
@@ -727,6 +815,15 @@ function formatSignedPercent(value) {
 
 function formatDateTime(date) {
   return `${date.toLocaleDateString([], { month: "short", day: "numeric" })}, ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function formatPointTime(epochSeconds) {
+  const date = new Date(Number(epochSeconds) * 1000);
+  if (!Number.isFinite(date.getTime())) return "";
+  const dateOptions = state.range === "1d" || state.range === "5d"
+    ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }
+    : { month: "short", day: "numeric", year: "numeric" };
+  return date.toLocaleString([], dateOptions);
 }
 
 function showToast(message) {

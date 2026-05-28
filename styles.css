@@ -414,6 +414,72 @@ a {
   opacity: 0.08;
 }
 
+.chart-hover {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.chart-hover.is-visible {
+  opacity: 1;
+}
+
+.chart-crosshair {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: rgba(95, 99, 104, 0.35);
+}
+
+.chart-point {
+  position: absolute;
+  left: -5px;
+  top: -5px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  background: var(--chart-hover-color, var(--blue));
+  box-shadow: 0 0 0 1px var(--chart-hover-color, var(--blue));
+}
+
+.chart-tooltip {
+  position: absolute;
+  display: grid;
+  gap: 3px;
+  min-width: 138px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 12px 30px rgba(60, 64, 67, 0.14);
+  backdrop-filter: blur(10px);
+}
+
+.chart-tooltip strong {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.chart-tooltip span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 520;
+}
+
+.chart-tooltip span.is-gain {
+  color: var(--gain);
+}
+
+.chart-tooltip span.is-loss {
+  color: var(--loss);
+}
+
 .chart-empty,
 .empty-state {
   display: grid;
