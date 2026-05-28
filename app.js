@@ -11,6 +11,7 @@ const REFRESH_INTERVAL_MS = 120000;
 const REALTIME_RECONNECT_MS = 5000;
 const REALTIME_RENDER_MS = 250;
 const FINNHUB_STORAGE_KEY = "marketpulse:finnhubToken";
+const FETCH_TIMEOUT_MS = 15000;
 const RANGE_MAP = {
   "1d": ["1d", "5m"],
   "5d": ["5d", "15m"],
@@ -39,6 +40,14 @@ const SEARCH_UNIVERSE = [
   ["DOGE", "Dogecoin", "crypto"],
   ["ADA", "Cardano", "crypto"],
 ];
+const COINGECKO_IDS = {
+  BTC: "bitcoin",
+  ETH: "ethereum",
+  SOL: "solana",
+  XRP: "ripple",
+  DOGE: "dogecoin",
+  ADA: "cardano",
+};
 
 const state = {
   quotes: new Map(),
@@ -178,11 +187,13 @@ async function loadAll(force = false) {
   render();
 
   try {
-    const quotes = (await mapLimit(DEFAULT_SYMBOLS, 4, (symbol) => fetchYahooChart(symbol, "1d"))).filter(isUsableQuote);
-    if (!quotes.length) throw new Error("No live quotes returned");
+    const quotes = (await mapLimit(DEFAULT_SYMBOLS, 2, (symbol) => fetchPublicQuote(symbol, "1d"))).filter(isUsableQuote);
+    if (!quotes.length && !state.quotes.size) throw new Error("No live quotes returned");
 
-    state.quotes = new Map(quotes.map((quote) => [quote.symbol, quote]));
-    if (!state.quotes.has(state.selected)) state.selected = quotes[0].symbol;
+    const nextQuotes = new Map(state.quotes);
+    quotes.forEach((quote) => nextQuotes.set(quote.symbol, quote));
+    state.quotes = nextQuotes;
+    if (!state.quotes.has(state.selected) && quotes[0]) state.selected = quotes[0].symbol;
     state.updatedAt = new Date();
     state.nextRefreshAt = Date.now() + REFRESH_INTERVAL_MS;
     state.live = true;
@@ -192,7 +203,7 @@ async function loadAll(force = false) {
     startRealtime();
     if (force) showToast("Updated");
   } catch (error) {
-    state.live = false;
+    state.live = state.quotes.size > 0;
     state.loading = false;
     state.error = state.quotes.size ? "" : "Live data unavailable";
     render();
@@ -204,7 +215,7 @@ async function loadHistory(symbol, range, shouldRender = true) {
   if (shouldRender) renderAsset();
 
   try {
-    const quote = await fetchYahooChart(symbol, range);
+    const quote = await fetchPublicQuote(symbol, range);
     if (isUsableQuote(quote)) {
       state.quotes.set(quote.symbol, { ...state.quotes.get(quote.symbol), ...quote });
       state.selected = quote.symbol;
@@ -309,6 +320,89 @@ async function fetchYahooChart(symbol, rangeKey = "1d") {
     volume: meta.regularMarketVolume || quote.volume?.at(-1),
     history: samplePoints(history, rangeKey === "1d" ? 120 : 160),
     source: "Yahoo Finance",
+  };
+}
+
+async function fetchPublicQuote(symbol, rangeKey = "1d") {
+  try {
+    return await fetchYahooChart(symbol, rangeKey);
+  } catch (error) {
+    if (CRYPTO.has(symbol)) return fetchCoinGeckoQuote(symbol);
+    return fetchStooqQuote(symbol);
+  }
+}
+
+async function fetchCoinGeckoQuote(symbol) {
+  const displaySymbol = symbol.replace("-USD", "").toUpperCase();
+  const id = COINGECKO_IDS[displaySymbol];
+  if (!id) throw new Error(`No CoinGecko id for ${displaySymbol}`);
+
+  const [priceData, chartData] = await Promise.all([
+    fetchJsonUrl(`https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(id)}&vs_currencies=usd&include_24hr_change=true&include_last_updated_at=true`),
+    fetchJsonUrl(`https://api.coingecko.com/api/v3/coins/${encodeURIComponent(id)}/market_chart?vs_currency=usd&days=1`),
+  ]);
+  const row = priceData?.[id] || {};
+  const price = Number(row.usd);
+  if (!Number.isFinite(price) || price <= 0) throw new Error(`No CoinGecko price for ${displaySymbol}`);
+
+  const changePercent = Number(row.usd_24h_change || 0);
+  const previousClose = changePercent ? price / (1 + changePercent / 100) : price;
+  const change = price - previousClose;
+  const history = (chartData?.prices || []).map(([time, value]) => ({
+    time: Math.floor(Number(time) / 1000),
+    price: Number(value),
+  })).filter((point) => Number.isFinite(point.time) && Number.isFinite(point.price));
+  const known = SEARCH_UNIVERSE.find(([knownSymbol]) => knownSymbol === displaySymbol);
+
+  return {
+    symbol: displaySymbol,
+    name: known?.[1] || displaySymbol,
+    type: "crypto",
+    exchange: "Crypto",
+    currency: "USD",
+    price,
+    previousClose,
+    change,
+    changePercent,
+    volume: undefined,
+    history: samplePoints(history, 120),
+    source: "CoinGecko",
+  };
+}
+
+async function fetchStooqQuote(symbol) {
+  const displaySymbol = symbol.replace("-USD", "").toUpperCase();
+  const stooqSymbol = `${displaySymbol.toLowerCase().replace(".", "-")}.us`;
+  const url = `https://stooq.com/q/l/?s=${encodeURIComponent(stooqSymbol)}&f=sd2t2ohlcv&h&e=csv`;
+  const text = await fetchTextThroughReader(url);
+  const csv = text.includes("Markdown Content:") ? text.split("Markdown Content:").pop() : text;
+  const lines = csv.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.includes(","));
+  const row = lines.find((line) => line.toUpperCase().startsWith(stooqSymbol.toUpperCase())) || lines[1];
+  if (!row) throw new Error(`No Stooq quote for ${displaySymbol}`);
+
+  const values = parseCsvLine(row);
+  const price = Number(values[6]);
+  if (!Number.isFinite(price) || price <= 0) throw new Error(`No Stooq price for ${displaySymbol}`);
+
+  const open = Number(values[3]);
+  const previousClose = Number.isFinite(open) && open > 0 ? open : price;
+  const change = price - previousClose;
+  const changePercent = previousClose ? (change / previousClose) * 100 : 0;
+  const known = SEARCH_UNIVERSE.find(([knownSymbol]) => knownSymbol === displaySymbol);
+
+  return {
+    symbol: displaySymbol,
+    name: known?.[1] || displaySymbol,
+    type: displaySymbol === "SPY" || displaySymbol === "QQQ" ? "etf" : "stock",
+    exchange: "Stooq",
+    currency: "USD",
+    price,
+    previousClose,
+    change,
+    changePercent,
+    volume: Number(values[7]) || undefined,
+    history: [],
+    source: "Stooq",
   };
 }
 
@@ -512,14 +606,47 @@ async function fetchYahooNews(symbol) {
 }
 
 async function fetchJsonThroughReader(url) {
-  const readerUrl = `https://r.jina.ai/http://r.jina.ai/http://${url}`;
-  const response = await fetch(readerUrl, { cache: "no-store" });
-  if (!response.ok) throw new Error(`Reader request failed ${response.status}`);
-  const text = await response.text();
+  const text = await fetchTextThroughReader(url);
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("Reader returned no JSON");
   return JSON.parse(text.slice(start, end + 1));
+}
+
+async function fetchTextThroughReader(url) {
+  const readerUrls = [
+    `https://r.jina.ai/http://${url}`,
+    `https://r.jina.ai/http://r.jina.ai/http://${url}`,
+  ];
+  let lastError;
+  for (const readerUrl of readerUrls) {
+    try {
+      return await fetchTextUrl(readerUrl);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Reader request failed");
+}
+
+async function fetchJsonUrl(url) {
+  const text = await fetchTextUrl(url);
+  return JSON.parse(text);
+}
+
+async function fetchTextUrl(url) {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS) : null;
+  try {
+    const response = await fetch(url, {
+      cache: "no-store",
+      signal: controller?.signal,
+    });
+    if (!response.ok) throw new Error(`Request failed ${response.status}`);
+    return response.text();
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function toYahooSymbol(symbol) {
@@ -549,6 +676,24 @@ function samplePoints(points, limit) {
   if (points.length <= limit) return points;
   const step = Math.max(1, Math.ceil(points.length / limit));
   return points.filter((_, index) => index % step === 0).slice(-limit);
+}
+
+function parseCsvLine(line) {
+  const values = [];
+  let value = "";
+  let quoted = false;
+  for (const char of line) {
+    if (char === "\"") {
+      quoted = !quoted;
+    } else if (char === "," && !quoted) {
+      values.push(value);
+      value = "";
+    } else {
+      value += char;
+    }
+  }
+  values.push(value);
+  return values;
 }
 
 function render() {

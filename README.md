@@ -8,7 +8,7 @@ Upload the repository and enable GitHub Pages from the repository root. The app 
 
 ## Data
 
-- Default mode: Yahoo Finance JSON endpoints through the public Jina reader bridge
+- Default mode: Yahoo Finance JSON endpoints through the public Jina reader bridge, with CoinGecko crypto and Stooq quote fallbacks
 - Realtime mode: click the live status in the top bar and paste a Finnhub token
 - Crypto stream symbols use Finnhub's `BINANCE:*USDT` trade feed
 
