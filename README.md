@@ -1,18 +1,14 @@
 # MarketPulse
 
-A local finance dashboard inspired by modern market apps. It serves a static front end plus a small Python proxy for live market data.
+A static finance dashboard inspired by modern market apps. It runs on GitHub Pages with no build step.
 
-## Run
+## GitHub Pages
 
-```powershell
-& "C:\Users\Galen Butler\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" server.py 8001
-```
-
-Open `http://127.0.0.1:8001`.
+Upload the repository and enable GitHub Pages from the repository root. The app entry point is `index.html`.
 
 ## Data
 
-- Stocks, ETFs, search, and news: Yahoo Finance JSON endpoints
-- Crypto prices and history: CoinGecko public API
+- Stocks, ETFs, crypto prices, charts, and news: Yahoo Finance JSON endpoints
+- Browser access: Yahoo data is fetched through the public Jina reader bridge so the static page can run without a backend
 
-The server keeps a small in-memory request cache to reduce repeat API calls. The UI does not use bundled quote data; if live data cannot be fetched, it shows an unavailable state.
+The UI does not use bundled quote data. If live data cannot be fetched, it shows an unavailable state.

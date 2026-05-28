@@ -283,7 +283,7 @@ def index_html() -> bytes:
   </head>
   <body>
     <div id="app" class="app-shell">{app_html}</div>
-    <script type="module" src="/app.js?v=realdata2"></script>
+    <script type="module" src="/app.js?v=realdata3"></script>
   </body>
 </html>""".encode("utf-8")
 
@@ -620,7 +620,7 @@ class MarketPulseHandler(SimpleHTTPRequestHandler):
             self.send_json(news_payload(query.get("symbol", ["AAPL"])[0]))
             return
 
-        if path in {"/", "/index.html"}:
+        if path in {"/", "/index.html", "/live"}:
             data = index_html()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")

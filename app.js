@@ -1,4 +1,4 @@
-const DEFAULT_SYMBOLS = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ", "META", "AMZN", "GOOGL", "BTC", "ETH", "SOL", "XRP"];
+const DEFAULT_SYMBOLS = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "BTC", "ETH", "SOL"];
 const CRYPTO = new Set(["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA"]);
 const CATEGORIES = [
   ["overview", "Market"],
@@ -7,6 +7,34 @@ const CATEGORIES = [
   ["etfs", "ETFs"],
 ];
 const RANGES = ["1d", "5d", "1mo", "6mo", "ytd", "1y"];
+const RANGE_MAP = {
+  "1d": ["1d", "5m"],
+  "5d": ["5d", "15m"],
+  "1mo": ["1mo", "1h"],
+  "6mo": ["6mo", "1d"],
+  ytd: ["ytd", "1d"],
+  "1y": ["1y", "1d"],
+};
+const SEARCH_UNIVERSE = [
+  ["AAPL", "Apple Inc.", "stock"],
+  ["MSFT", "Microsoft Corporation", "stock"],
+  ["NVDA", "NVIDIA Corporation", "stock"],
+  ["TSLA", "Tesla, Inc.", "stock"],
+  ["SPY", "SPDR S&P 500 ETF Trust", "etf"],
+  ["QQQ", "Invesco QQQ Trust", "etf"],
+  ["META", "Meta Platforms, Inc.", "stock"],
+  ["AMZN", "Amazon.com, Inc.", "stock"],
+  ["GOOGL", "Alphabet Inc.", "stock"],
+  ["AMD", "Advanced Micro Devices, Inc.", "stock"],
+  ["NFLX", "Netflix, Inc.", "stock"],
+  ["AVGO", "Broadcom Inc.", "stock"],
+  ["BTC", "Bitcoin", "crypto"],
+  ["ETH", "Ethereum", "crypto"],
+  ["SOL", "Solana", "crypto"],
+  ["XRP", "XRP", "crypto"],
+  ["DOGE", "Dogecoin", "crypto"],
+  ["ADA", "Cardano", "crypto"],
+];
 
 const state = {
   quotes: new Map(),
@@ -66,7 +94,7 @@ function boot() {
   render();
   loadAll();
   setInterval(updateStatus, 1000);
-  setInterval(loadAll, 60000);
+  setInterval(loadAll, 120000);
 }
 
 function bindEvents() {
@@ -107,7 +135,7 @@ function bindEvents() {
       renderSearch();
       return;
     }
-    searchTimer = setTimeout(() => search(query), 180);
+    searchTimer = setTimeout(() => search(query), 120);
   });
   searchInput.addEventListener("focus", () => {
     if (state.searchResults.length) {
@@ -131,24 +159,22 @@ async function loadAll(force = false) {
   render();
 
   try {
-    const data = await fetchJson(`/api/quotes?symbols=${encodeURIComponent(DEFAULT_SYMBOLS.join(","))}`);
-    const quotes = Array.isArray(data.quotes) ? data.quotes.filter((quote) => isUsableQuote(quote)) : [];
+    const quotes = (await mapLimit(DEFAULT_SYMBOLS, 4, (symbol) => fetchYahooChart(symbol, "1d"))).filter(isUsableQuote);
     if (!quotes.length) throw new Error("No live quotes returned");
 
     state.quotes = new Map(quotes.map((quote) => [quote.symbol, quote]));
     if (!state.quotes.has(state.selected)) state.selected = quotes[0].symbol;
-    state.updatedAt = data.updatedAt ? new Date(data.updatedAt * 1000) : new Date();
-    state.nextRefreshAt = Date.now() + 60000;
+    state.updatedAt = new Date();
+    state.nextRefreshAt = Date.now() + 120000;
     state.live = true;
     state.loading = false;
 
-    await Promise.all([loadHistory(state.selected, state.range, false), loadNews(state.selected, false)]);
     render();
     if (force) showToast("Updated");
   } catch (error) {
     state.live = false;
     state.loading = false;
-    if (!state.quotes.size) state.error = "Live data unavailable";
+    state.error = state.quotes.size ? "" : "Live data unavailable";
     render();
   }
 }
@@ -158,14 +184,10 @@ async function loadHistory(symbol, range, shouldRender = true) {
   if (shouldRender) renderAsset();
 
   try {
-    const data = await fetchJson(`/api/history?symbol=${encodeURIComponent(symbol)}&range=${encodeURIComponent(range)}`);
-    const quote = data.quote || state.quotes.get(symbol);
+    const quote = await fetchYahooChart(symbol, range);
     if (isUsableQuote(quote)) {
-      state.quotes.set(symbol, {
-        ...state.quotes.get(symbol),
-        ...quote,
-        history: Array.isArray(data.history) ? data.history : quote.history || [],
-      });
+      state.quotes.set(quote.symbol, { ...state.quotes.get(quote.symbol), ...quote });
+      state.selected = quote.symbol;
       state.error = "";
     } else if (!state.quotes.has(symbol)) {
       state.error = "Live quote unavailable";
@@ -181,21 +203,25 @@ async function loadHistory(symbol, range, shouldRender = true) {
 
 async function loadNews(symbol, shouldRender = true) {
   try {
-    const data = await fetchJson(`/api/news?symbol=${encodeURIComponent(symbol)}`);
-    state.news = Array.isArray(data.news) ? data.news : [];
+    state.news = await fetchYahooNews(symbol);
   } catch (error) {
     state.news = [];
   }
   if (shouldRender) renderNews();
 }
 
-async function search(query) {
-  try {
-    const data = await fetchJson(`/api/search?q=${encodeURIComponent(query)}`);
-    state.searchResults = Array.isArray(data.results) ? data.results : [];
-  } catch (error) {
-    state.searchResults = [];
-  }
+function search(query) {
+  const normalized = query.trim().toLowerCase();
+  const local = SEARCH_UNIVERSE.filter(([symbol, name]) => (
+    symbol.toLowerCase().includes(normalized) || name.toLowerCase().includes(normalized)
+  )).map(([symbol, name, type]) => ({ symbol, name, type }));
+
+  const rawSymbol = query.trim().toUpperCase().replace(/[^A-Z0-9.-]/g, "");
+  const exact = rawSymbol && rawSymbol.length <= 12 && !local.some((item) => item.symbol === rawSymbol)
+    ? [{ symbol: rawSymbol, name: rawSymbol, type: CRYPTO.has(rawSymbol) ? "crypto" : "stock" }]
+    : [];
+
+  state.searchResults = [...local, ...exact].slice(0, 10);
   state.searchOpen = true;
   renderSearch();
 }
@@ -205,8 +231,11 @@ function selectSymbol(symbol) {
   state.selected = symbol.replace("-USD", "").toUpperCase();
   localStorage.setItem("marketpulse:selected", state.selected);
   document.querySelector("#searchInput").value = "";
-  loadHistory(state.selected, state.range);
-  loadNews(state.selected);
+  if (state.range === "1d" && state.quotes.has(state.selected)) {
+    render();
+  } else {
+    loadHistory(state.selected, state.range);
+  }
   render();
 }
 
@@ -218,6 +247,97 @@ function toggleWatch(symbol) {
   }
   localStorage.setItem("marketpulse:watchlist", JSON.stringify(state.watchlist));
   render();
+}
+
+async function fetchYahooChart(symbol, rangeKey = "1d") {
+  const displaySymbol = symbol.replace("-USD", "").toUpperCase();
+  const yahooSymbol = toYahooSymbol(displaySymbol);
+  const [range, interval] = RANGE_MAP[rangeKey] || RANGE_MAP["1d"];
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?range=${range}&interval=${interval}&includePrePost=false&events=div%2Csplits`;
+  const data = await fetchJsonThroughReader(url);
+  const result = data?.chart?.result?.[0];
+  if (!result) throw new Error(`No chart data for ${displaySymbol}`);
+
+  const meta = result.meta || {};
+  const quote = result.indicators?.quote?.[0] || {};
+  const timestamps = result.timestamp || [];
+  const closes = quote.close || [];
+  const history = timestamps.map((timestamp, index) => ({
+    time: timestamp,
+    price: Number(closes[index]),
+  })).filter((point) => Number.isFinite(point.price));
+
+  const price = Number(meta.regularMarketPrice || history.at(-1)?.price || 0);
+  const previous = Number(meta.chartPreviousClose || meta.previousClose || history[0]?.price || price);
+  const change = price - previous;
+  const changePercent = previous ? (change / previous) * 100 : 0;
+  const known = SEARCH_UNIVERSE.find(([knownSymbol]) => knownSymbol === displaySymbol);
+
+  return {
+    symbol: displaySymbol,
+    name: known?.[1] || meta.longName || meta.shortName || displaySymbol,
+    type: CRYPTO.has(displaySymbol) ? "crypto" : meta.instrumentType === "ETF" ? "etf" : "stock",
+    exchange: CRYPTO.has(displaySymbol) ? "Crypto" : meta.exchangeName || meta.fullExchangeName || "Market",
+    currency: meta.currency || "USD",
+    price,
+    previousClose: previous,
+    change,
+    changePercent,
+    volume: meta.regularMarketVolume || quote.volume?.at(-1),
+    history: samplePoints(history, rangeKey === "1d" ? 120 : 160),
+    source: "Yahoo Finance",
+  };
+}
+
+async function fetchYahooNews(symbol) {
+  const query = CRYPTO.has(symbol) ? SEARCH_UNIVERSE.find(([item]) => item === symbol)?.[1] || symbol : symbol;
+  const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=0&newsCount=5`;
+  const data = await fetchJsonThroughReader(url);
+  return (data.news || []).slice(0, 5).map((item) => ({
+    title: item.title,
+    publisher: item.publisher,
+    link: item.link,
+  })).filter((item) => item.title);
+}
+
+async function fetchJsonThroughReader(url) {
+  const readerUrl = `https://r.jina.ai/http://r.jina.ai/http://${url}`;
+  const response = await fetch(readerUrl, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Reader request failed ${response.status}`);
+  const text = await response.text();
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("Reader returned no JSON");
+  return JSON.parse(text.slice(start, end + 1));
+}
+
+function toYahooSymbol(symbol) {
+  if (CRYPTO.has(symbol)) return `${symbol}-USD`;
+  return symbol.replace(".", "-");
+}
+
+async function mapLimit(items, limit, mapper) {
+  const results = [];
+  let index = 0;
+  async function worker() {
+    while (index < items.length) {
+      const current = items[index];
+      index += 1;
+      try {
+        results.push(await mapper(current));
+      } catch (error) {
+        // Individual quote failures should not blank the whole dashboard.
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+function samplePoints(points, limit) {
+  if (points.length <= limit) return points;
+  const step = Math.max(1, Math.ceil(points.length / limit));
+  return points.filter((_, index) => index % step === 0).slice(-limit);
 }
 
 function render() {
@@ -282,12 +402,8 @@ function renderAsset() {
 function renderWatchlist() {
   const rows = state.watchlist.map((symbol) => state.quotes.get(symbol)).filter(Boolean);
   document.querySelector("#watchlistPanel").innerHTML = `
-    <div class="section-head">
-      <h2>Watchlist</h2>
-    </div>
-    <div class="quote-list">
-      ${rows.length ? rows.map(quoteRow).join("") : `<div class="empty-state">No data</div>`}
-    </div>
+    <div class="section-head"><h2>Watchlist</h2></div>
+    <div class="quote-list">${rows.length ? rows.map(quoteRow).join("") : `<div class="empty-state">No data</div>`}</div>
   `;
 }
 
@@ -312,9 +428,7 @@ function renderCrypto() {
 function renderNews() {
   document.querySelector("#newsPanel").innerHTML = `
     <div class="section-head"><h2>News</h2></div>
-    <div class="news-list">
-      ${state.news.length ? state.news.slice(0, 5).map(newsRow).join("") : `<div class="empty-state">No headlines</div>`}
-    </div>
+    <div class="news-list">${state.news.length ? state.news.slice(0, 5).map(newsRow).join("") : `<div class="empty-state">No headlines</div>`}</div>
   `;
 }
 
@@ -335,10 +449,7 @@ function quoteRow(quote) {
   const positive = Number(quote.changePercent) >= 0;
   return `
     <button class="quote-row ${quote.symbol === state.selected ? "is-selected" : ""}" type="button" data-select-symbol="${escapeAttr(quote.symbol)}">
-      <span>
-        <span class="row-symbol">${escapeHtml(quote.symbol)}</span>
-        <span class="row-name">${escapeHtml(quote.name || quote.symbol)}</span>
-      </span>
+      <span><span class="row-symbol">${escapeHtml(quote.symbol)}</span><span class="row-name">${escapeHtml(quote.name || quote.symbol)}</span></span>
       <span class="mini-spark">${sparklineSvg(quote.history || [], positive)}</span>
       <span class="row-price">${formatMoney(quote.price)}</span>
       <span class="${positive ? "is-gain" : "is-loss"}">${formatSignedPercent(quote.changePercent)}</span>
@@ -354,7 +465,7 @@ function simpleTable(rows) {
       <tbody>${rows.map((quote) => {
         const positive = Number(quote.changePercent) >= 0;
         return `
-          <tr data-select-symbol="${escapeAttr(quote.symbol)}">
+          <tr>
             <td><button class="table-symbol" type="button" data-select-symbol="${escapeAttr(quote.symbol)}">${escapeHtml(quote.symbol)}<span>${escapeHtml(quote.name || quote.symbol)}</span></button></td>
             <td>${formatMoney(quote.price)}</td>
             <td class="${positive ? "is-gain" : "is-loss"}">${formatSignedPercent(quote.changePercent)}</td>
@@ -396,18 +507,12 @@ function updateStatus() {
     return;
   }
   const seconds = Math.max(0, Math.ceil((state.nextRefreshAt - Date.now()) / 1000));
-  status.textContent = `Live ${seconds || 60}s`;
+  status.textContent = `Live ${seconds || 120}s`;
 }
 
 function closeSearch() {
   state.searchOpen = false;
   renderSearch();
-}
-
-async function fetchJson(url) {
-  const response = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!response.ok) throw new Error(`Request failed ${response.status}`);
-  return response.json();
 }
 
 function isUsableQuote(quote) {
