@@ -476,7 +476,7 @@ function formatMoney(value) {
 function formatSignedMoney(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
-  const sign = number > 0 ? "+" : "";
+  const sign = number > 0 ? "+" : number < 0 ? "-" : "";
   return `${sign}${formatMoney(Math.abs(number))}`;
 }
 

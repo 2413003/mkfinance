@@ -8,6 +8,7 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import escape
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -91,6 +92,200 @@ def compact_history(timestamps: list[int], closes: list[float | None]) -> list[d
             continue
         points.append({"time": int(timestamp), "price": round(float(close), 4)})
     return sample_points(points)
+
+
+def format_money(value: object) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    if number <= 0:
+        return "--"
+    digits = 2 if abs(number) >= 1 else 6
+    return f"${number:,.{digits}f}"
+
+
+def format_percent(value: object) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    return f"{number:+.2f}%"
+
+
+def format_signed_money(value: object) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    sign = "+" if number > 0 else "-" if number < 0 else ""
+    return f"{sign}{format_money(abs(number))}"
+
+
+def svg_path(points: list[dict[str, float]], width: int, height: int, padding: int) -> tuple[str, str]:
+    values = [float(point["price"]) for point in points if point.get("price") is not None]
+    if len(values) < 2:
+        return "", ""
+    minimum = min(values)
+    maximum = max(values)
+    value_range = maximum - minimum or max(1, maximum * 0.01)
+    coords = []
+    for index, value in enumerate(values):
+        x = padding + (index / (len(values) - 1)) * (width - padding * 2)
+        y = padding + (1 - (value - minimum) / value_range) * (height - padding * 2)
+        coords.append((x, y))
+    line = " ".join(f"{'L' if index else 'M'}{x:.2f} {y:.2f}" for index, (x, y) in enumerate(coords))
+    first = coords[0]
+    last = coords[-1]
+    area = f"{line} L{last[0]:.2f} {height - padding} L{first[0]:.2f} {height - padding} Z"
+    return line, area
+
+
+def chart_svg(points: list[dict[str, float]], positive: bool, width: int = 900, height: int = 340) -> str:
+    line, area = svg_path(points, width, height, 18)
+    if not line:
+        return '<div class="chart-empty">No chart</div>'
+    color = "#0a8f54" if positive else "#d93025"
+    grid = "".join(
+        f'<line class="chart-grid-line" x1="0" y1="{y}" x2="{width}" y2="{y}"></line>'
+        for y in (76, 152, 228, 304)
+    )
+    return (
+        f'<svg class="chart-svg" viewBox="0 0 {width} {height}" preserveAspectRatio="none" role="img">'
+        f"{grid}<path class=\"chart-fill\" d=\"{area}\" fill=\"{color}\"></path>"
+        f'<path class="chart-line" d="{line}" stroke="{color}"></path></svg>'
+    )
+
+
+def sparkline_svg(points: list[dict[str, float]], positive: bool) -> str:
+    line, _ = svg_path(points, 84, 28, 2)
+    if not line:
+        return ""
+    color = "#0a8f54" if positive else "#d93025"
+    return (
+        '<svg class="sparkline-svg" viewBox="0 0 84 28" preserveAspectRatio="none" aria-hidden="true">'
+        f'<path d="{line}" fill="none" stroke="{color}" stroke-width="1.8" stroke-linecap="round"></path></svg>'
+    )
+
+
+def initial_app_html() -> str:
+    requested = DEFAULT_SYMBOLS + ["BTC", "ETH", "SOL", "XRP"]
+    payload = quotes_payload(requested)
+    quotes = [quote for quote in payload.get("quotes", []) if quote.get("price")]
+    if not quotes:
+        raise ValueError("No live quotes available")
+
+    selected = quotes[0]
+    watched_symbols = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "BTC", "ETH"]
+    by_symbol = {quote["symbol"]: quote for quote in quotes}
+    watchlist = [by_symbol[symbol] for symbol in watched_symbols if symbol in by_symbol]
+    movers = sorted(quotes, key=lambda quote: abs(float(quote.get("changePercent") or 0)), reverse=True)[:6]
+    crypto = [quote for quote in quotes if quote.get("type") == "crypto"][:6]
+    positive = float(selected.get("changePercent") or 0) >= 0
+    updated_at = time.strftime("%d %b, %H:%M", time.localtime(int(payload.get("updatedAt", time.time()))))
+
+    def quote_row(quote: dict[str, object]) -> str:
+        row_positive = float(quote.get("changePercent") or 0) >= 0
+        direction = "is-gain" if row_positive else "is-loss"
+        return (
+            f'<button class="quote-row" type="button" data-select-symbol="{escape(str(quote["symbol"]))}">'
+            f'<span><span class="row-symbol">{escape(str(quote["symbol"]))}</span>'
+            f'<span class="row-name">{escape(str(quote.get("name") or quote["symbol"]))}</span></span>'
+            f'<span class="mini-spark">{sparkline_svg(quote.get("history", []), row_positive)}</span>'
+            f'<span class="row-price">{format_money(quote.get("price"))}</span>'
+            f'<span class="{direction}">{format_percent(quote.get("changePercent"))}</span></button>'
+        )
+
+    def table_rows(rows: list[dict[str, object]]) -> str:
+        body = []
+        for quote in rows:
+            row_positive = float(quote.get("changePercent") or 0) >= 0
+            direction = "is-gain" if row_positive else "is-loss"
+            body.append(
+                f'<tr><td><button class="table-symbol" type="button" data-select-symbol="{escape(str(quote["symbol"]))}">'
+                f'{escape(str(quote["symbol"]))}<span>{escape(str(quote.get("name") or quote["symbol"]))}</span></button></td>'
+                f"<td>{format_money(quote.get('price'))}</td><td class=\"{direction}\">{format_percent(quote.get('changePercent'))}</td></tr>"
+            )
+        return (
+            '<table class="table"><thead><tr><th>Symbol</th><th>Price</th><th>Change</th></tr></thead>'
+            f"<tbody>{''.join(body)}</tbody></table>"
+        )
+
+    return f"""
+      <header class="topbar">
+        <button class="brand" type="button" data-select-symbol="AAPL" aria-label="MarketPulse home">
+          <span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 13h4l2-6 4 12 3-8h5"/></svg></span>
+          <span>MarketPulse</span>
+        </button>
+        <div class="search-wrap">
+          <span class="search-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg></span>
+          <input id="searchInput" class="search-input" type="search" autocomplete="off" placeholder="Search" aria-label="Search stocks, ETFs, crypto" />
+          <div id="searchResults" class="search-results" role="listbox"></div>
+        </div>
+        <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M19 11a7 7 0 0 0-12-4l-3 3"/><path d="M5 13a7 7 0 0 0 12 4l3-3"/></svg></button>
+        <div class="live-state" aria-live="polite"><span id="liveDot" class="live-dot"></span><span id="statusText">Live</span></div>
+      </header>
+      <main class="page">
+        <nav id="categoryTabs" class="tabs" aria-label="Market category">
+          <button class="tab is-active" type="button" data-category="overview">Market</button>
+          <button class="tab" type="button" data-category="us">US</button>
+          <button class="tab" type="button" data-category="crypto">Crypto</button>
+          <button class="tab" type="button" data-category="etfs">ETFs</button>
+        </nav>
+        <section class="main-grid">
+          <section id="assetPanel" class="asset-panel" aria-label="Selected market">
+            <div class="asset-top">
+              <div>
+                <div class="asset-name-row">
+                  <h1>{escape(str(selected.get("name") or selected["symbol"]))}</h1>
+                  <span>{escape(str(selected["symbol"]))} &#183; {escape(str(selected.get("exchange") or selected.get("type") or "Market"))}</span>
+                </div>
+                <div class="price-row">
+                  <span class="price">{format_money(selected.get("price"))}</span>
+                  <span class="change {'is-gain' if positive else 'is-loss'}">{format_signed_money(selected.get("change"))} ({format_percent(selected.get("changePercent"))})</span>
+                </div>
+              </div>
+              <button class="watch-toggle" type="button" data-toggle-watch aria-label="Toggle watch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.1L12 17.2 6.4 20.1 7.5 14 3 9.6l6.2-.9L12 3z"/></svg></button>
+            </div>
+            <div class="meta-line">{updated_at}</div>
+            <div class="range-row"><button class="range is-active" type="button" data-range="1d">1D</button><button class="range" type="button" data-range="5d">5D</button><button class="range" type="button" data-range="1mo">1MO</button><button class="range" type="button" data-range="6mo">6MO</button><button class="range" type="button" data-range="ytd">YTD</button><button class="range" type="button" data-range="1y">1Y</button></div>
+            <div class="chart-wrap">{chart_svg(selected.get("history", []), positive)}</div>
+          </section>
+          <aside id="watchlistPanel" class="watchlist" aria-label="Watchlist">
+            <div class="section-head"><h2>Watchlist</h2></div>
+            <div class="quote-list">{''.join(quote_row(quote) for quote in watchlist)}</div>
+          </aside>
+        </section>
+        <section class="lower-grid">
+          <section id="moversPanel" class="simple-section"><div class="section-head"><h2>Movers</h2></div>{table_rows(movers)}</section>
+          <section id="cryptoPanel" class="simple-section"><div class="section-head"><h2>Crypto</h2></div>{table_rows(crypto)}</section>
+          <section id="newsPanel" class="simple-section"><div class="section-head"><h2>News</h2></div><div class="news-list"><div class="empty-state">Loading headlines</div></div></section>
+        </section>
+      </main>
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    """
+
+
+def index_html() -> bytes:
+    style = (ROOT / "styles.css").read_text(encoding="utf-8")
+    try:
+        app_html = initial_app_html()
+    except Exception as exc:
+        app_html = f'<main class="boot-fallback"><strong>MarketPulse</strong><span>{escape(str(exc))}</span></main>'
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MarketPulse</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23111722'/%3E%3Cpath d='M10 35h12l5-17 10 32 7-22h10' fill='none' stroke='%2328b67a' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <style>{style}</style>
+  </head>
+  <body>
+    <div id="app" class="app-shell">{app_html}</div>
+    <script type="module" src="/app.js?v=realdata2"></script>
+  </body>
+</html>""".encode("utf-8")
 
 
 def fetch_yahoo_chart(symbol: str, range_key: str = "1d", interval: str = "5m") -> dict[str, object]:
@@ -425,8 +620,15 @@ class MarketPulseHandler(SimpleHTTPRequestHandler):
             self.send_json(news_payload(query.get("symbol", ["AAPL"])[0]))
             return
 
-        if path == "/":
-            path = "/index.html"
+        if path in {"/", "/index.html"}:
+            data = index_html()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         file_path = (ROOT / path.lstrip("/")).resolve()
         if ROOT not in file_path.parents and file_path != ROOT:
             self.send_error(404)
