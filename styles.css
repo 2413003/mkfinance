@@ -51,11 +51,11 @@ a {
 
 .app-shell {
   min-height: 100vh;
+  background: #ffffff;
 }
 
 .topbar {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 20;
   display: grid;
   grid-template-columns: auto minmax(220px, 560px) 40px auto;
@@ -64,8 +64,30 @@ a {
   min-height: 64px;
   padding: 12px 24px;
   border-bottom: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(18px);
+  background: #ffffff;
+}
+
+.boot-fallback {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  color: var(--text);
+  background: #ffffff;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  text-align: center;
+}
+
+.boot-fallback strong {
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.boot-fallback span {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .brand {

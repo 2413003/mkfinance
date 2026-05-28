@@ -477,7 +477,7 @@ function formatSignedMoney(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
   const sign = number > 0 ? "+" : "";
-  return `${sign}${formatMoney(number)}`;
+  return `${sign}${formatMoney(Math.abs(number))}`;
 }
 
 function formatSignedPercent(value) {
