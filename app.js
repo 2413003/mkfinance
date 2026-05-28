@@ -8,12 +8,9 @@ const CATEGORIES = [
 ];
 const RANGES = ["1d", "5d", "1mo", "6mo", "ytd", "1y"];
 const REFRESH_INTERVAL_MS = 120000;
-const REALTIME_RECONNECT_MS = 5000;
-const REALTIME_RENDER_MS = 250;
-const FINNHUB_STORAGE_KEY = "marketpulse:finnhubToken";
 const FETCH_TIMEOUT_MS = 15000;
 const RANGE_MAP = {
-  "1d": ["1d", "5m"],
+  "1d": ["5d", "5m"],
   "5d": ["5d", "15m"],
   "1mo": ["1mo", "1h"],
   "6mo": ["6mo", "1d"],
@@ -60,16 +57,6 @@ const state = {
   error: "",
   updatedAt: null,
   nextRefreshAt: 0,
-  realtime: {
-    socket: null,
-    token: readRealtimeToken(),
-    connected: false,
-    status: "off",
-    lastTickAt: null,
-    reconnectTimer: null,
-    renderTimer: null,
-    subscribed: new Set(),
-  },
   watchlist: readWatchlist(),
   searchResults: [],
   searchOpen: false,
@@ -86,17 +73,15 @@ function boot() {
   app.className = "app-shell";
   app.innerHTML = `
     <header class="topbar">
-      <button class="brand" type="button" data-select-symbol="AAPL" aria-label="MarketPulse home">
+      <button class="brand" type="button" data-select-symbol="AAPL" aria-label="MK Finance home">
         <span class="brand-mark">${icon("pulse")}</span>
-        <span>MarketPulse</span>
+        <span>MK Finance</span>
       </button>
       <div class="search-wrap">
         <span class="search-icon">${icon("search")}</span>
         <input id="searchInput" class="search-input" type="search" autocomplete="off" placeholder="Search" aria-label="Search stocks, ETFs, crypto" />
         <div id="searchResults" class="search-results" role="listbox"></div>
       </div>
-      <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh">${icon("refresh")}</button>
-      <button id="realtimeButton" class="live-state" type="button" aria-label="Realtime settings"><span id="liveDot" class="live-dot"></span><span id="statusText">--</span></button>
     </header>
     <main class="page">
       <nav id="categoryTabs" class="tabs" aria-label="Market category"></nav>
@@ -116,10 +101,7 @@ function boot() {
   bindEvents();
   render();
   loadAll();
-  setInterval(updateStatus, 1000);
-  setInterval(() => {
-    if (!state.realtime.connected) loadAll();
-  }, REFRESH_INTERVAL_MS);
+  setInterval(loadAll, REFRESH_INTERVAL_MS);
 }
 
 function bindEvents() {
@@ -129,8 +111,6 @@ function bindEvents() {
     const range = target.closest("[data-range]");
     const category = target.closest("[data-category]");
     const watch = target.closest("[data-toggle-watch]");
-    const refresh = target.closest("#refreshButton");
-    const realtime = target.closest("#realtimeButton");
 
     if (select) {
       selectSymbol(select.dataset.selectSymbol);
@@ -144,10 +124,6 @@ function bindEvents() {
       render();
     } else if (watch) {
       toggleWatch(state.selected);
-    } else if (refresh) {
-      loadAll(true);
-    } else if (realtime) {
-      configureRealtime();
     } else if (!target.closest(".search-wrap")) {
       closeSearch();
     }
@@ -200,7 +176,6 @@ async function loadAll(force = false) {
     state.loading = false;
 
     render();
-    startRealtime();
     if (force) showToast("Updated");
   } catch (error) {
     state.live = state.quotes.size > 0;
@@ -220,7 +195,6 @@ async function loadHistory(symbol, range, shouldRender = true) {
       state.quotes.set(quote.symbol, { ...state.quotes.get(quote.symbol), ...quote });
       state.selected = quote.symbol;
       state.error = "";
-      syncRealtimeSubscriptions();
     } else if (!state.quotes.has(symbol)) {
       state.error = "Live quote unavailable";
     }
@@ -269,7 +243,6 @@ function selectSymbol(symbol) {
     loadHistory(state.selected, state.range);
   }
   render();
-  startRealtime();
 }
 
 function toggleWatch(symbol) {
@@ -280,14 +253,14 @@ function toggleWatch(symbol) {
   }
   localStorage.setItem("marketpulse:watchlist", JSON.stringify(state.watchlist));
   render();
-  syncRealtimeSubscriptions();
 }
 
 async function fetchYahooChart(symbol, rangeKey = "1d") {
   const displaySymbol = symbol.replace("-USD", "").toUpperCase();
   const yahooSymbol = toYahooSymbol(displaySymbol);
   const [range, interval] = RANGE_MAP[rangeKey] || RANGE_MAP["1d"];
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?range=${range}&interval=${interval}&includePrePost=false&events=div%2Csplits`;
+  const includePrePost = rangeKey === "1d" ? "true" : "false";
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?range=${range}&interval=${interval}&includePrePost=${includePrePost}&events=div%2Csplits`;
   const data = await fetchJsonThroughReader(url);
   const result = data?.chart?.result?.[0];
   if (!result) throw new Error(`No chart data for ${displaySymbol}`);
@@ -296,10 +269,11 @@ async function fetchYahooChart(symbol, rangeKey = "1d") {
   const quote = result.indicators?.quote?.[0] || {};
   const timestamps = result.timestamp || [];
   const closes = quote.close || [];
-  const history = timestamps.map((timestamp, index) => ({
+  const rawHistory = timestamps.map((timestamp, index) => ({
     time: timestamp,
     price: Number(closes[index]),
   })).filter((point) => Number.isFinite(point.price));
+  const history = clipHistoryForRange(rawHistory, rangeKey, meta);
 
   const price = Number(meta.regularMarketPrice || history.at(-1)?.price || 0);
   const previous = Number(meta.chartPreviousClose || meta.previousClose || history[0]?.price || price);
@@ -406,194 +380,6 @@ async function fetchStooqQuote(symbol) {
   };
 }
 
-function configureRealtime() {
-  const existing = state.realtime.token || "";
-  const token = window.prompt("Finnhub token for realtime streaming", existing);
-  if (token === null) return;
-  state.realtime.token = token.trim();
-  if (state.realtime.token) {
-    localStorage.setItem(FINNHUB_STORAGE_KEY, state.realtime.token);
-    startRealtime(true);
-  } else {
-    localStorage.removeItem(FINNHUB_STORAGE_KEY);
-    stopRealtime();
-    updateStatus();
-  }
-}
-
-function startRealtime(force = false) {
-  if (!state.realtime.token) {
-    stopRealtime();
-    return;
-  }
-  if (state.realtime.socket && !force) {
-    syncRealtimeSubscriptions();
-    return;
-  }
-  stopRealtime();
-  clearTimeout(state.realtime.reconnectTimer);
-  state.realtime.status = "connecting";
-  updateStatus();
-
-  const socket = new WebSocket(`wss://ws.finnhub.io?token=${encodeURIComponent(state.realtime.token)}`);
-  state.realtime.socket = socket;
-
-  socket.addEventListener("open", () => {
-    if (state.realtime.socket !== socket) return;
-    state.realtime.connected = true;
-    state.realtime.status = "streaming";
-    syncRealtimeSubscriptions();
-    updateStatus();
-    if (force) showToast("Realtime on");
-  });
-
-  socket.addEventListener("message", (event) => {
-    if (state.realtime.socket !== socket) return;
-    let message;
-    try {
-      message = JSON.parse(event.data);
-    } catch (error) {
-      return;
-    }
-    if (message.type === "error") {
-      state.realtime.status = "error";
-      state.realtime.connected = false;
-      state.realtime.socket = null;
-      state.realtime.subscribed.clear();
-      socket.close();
-      showToast(message.msg || "Realtime unavailable");
-      updateStatus();
-      return;
-    }
-    if (message.type !== "trade" || !Array.isArray(message.data)) return;
-    message.data.forEach(applyRealtimeTrade);
-    state.realtime.lastTickAt = new Date();
-    scheduleRealtimeRender();
-  });
-
-  socket.addEventListener("close", () => {
-    if (state.realtime.socket !== socket) return;
-    state.realtime.connected = false;
-    state.realtime.socket = null;
-    state.realtime.subscribed.clear();
-    if (state.realtime.token) {
-      state.realtime.status = "reconnecting";
-      clearTimeout(state.realtime.reconnectTimer);
-      state.realtime.reconnectTimer = setTimeout(() => startRealtime(), REALTIME_RECONNECT_MS);
-    } else {
-      state.realtime.status = "off";
-    }
-    updateStatus();
-  });
-
-  socket.addEventListener("error", () => {
-    if (state.realtime.socket !== socket) return;
-    state.realtime.connected = false;
-    state.realtime.status = "error";
-    updateStatus();
-  });
-}
-
-function stopRealtime() {
-  clearTimeout(state.realtime.reconnectTimer);
-  state.realtime.reconnectTimer = null;
-  clearTimeout(state.realtime.renderTimer);
-  state.realtime.renderTimer = null;
-  if (state.realtime.socket) {
-    const socket = state.realtime.socket;
-    state.realtime.socket = null;
-    socket.close();
-  }
-  state.realtime.connected = false;
-  state.realtime.status = "off";
-  state.realtime.subscribed.clear();
-}
-
-function syncRealtimeSubscriptions() {
-  const socket = state.realtime.socket;
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  const wanted = new Set(realtimeSymbols());
-
-  state.realtime.subscribed.forEach((symbol) => {
-    if (!wanted.has(symbol)) {
-      socket.send(JSON.stringify({ type: "unsubscribe", symbol }));
-      state.realtime.subscribed.delete(symbol);
-    }
-  });
-
-  wanted.forEach((symbol) => {
-    if (!state.realtime.subscribed.has(symbol)) {
-      socket.send(JSON.stringify({ type: "subscribe", symbol }));
-      state.realtime.subscribed.add(symbol);
-    }
-  });
-}
-
-function realtimeSymbols() {
-  return [...new Set([...DEFAULT_SYMBOLS, ...state.watchlist, state.selected])]
-    .map(toFinnhubSymbol)
-    .filter(Boolean);
-}
-
-function toFinnhubSymbol(symbol) {
-  const normalized = symbol.replace("-USD", "").toUpperCase();
-  const cryptoMap = {
-    BTC: "BINANCE:BTCUSDT",
-    ETH: "BINANCE:ETHUSDT",
-    SOL: "BINANCE:SOLUSDT",
-    XRP: "BINANCE:XRPUSDT",
-    DOGE: "BINANCE:DOGEUSDT",
-    ADA: "BINANCE:ADAUSDT",
-  };
-  return cryptoMap[normalized] || normalized;
-}
-
-function fromFinnhubSymbol(symbol) {
-  const cryptoMap = {
-    "BINANCE:BTCUSDT": "BTC",
-    "BINANCE:ETHUSDT": "ETH",
-    "BINANCE:SOLUSDT": "SOL",
-    "BINANCE:XRPUSDT": "XRP",
-    "BINANCE:DOGEUSDT": "DOGE",
-    "BINANCE:ADAUSDT": "ADA",
-  };
-  return cryptoMap[symbol] || symbol;
-}
-
-function applyRealtimeTrade(trade) {
-  const symbol = fromFinnhubSymbol(String(trade.s || ""));
-  const price = Number(trade.p);
-  if (!symbol || !Number.isFinite(price) || price <= 0) return;
-
-  const quote = state.quotes.get(symbol);
-  if (!quote) return;
-  const previousClose = Number(quote.previousClose || quote.price || price);
-  const change = price - previousClose;
-  const changePercent = previousClose ? (change / previousClose) * 100 : 0;
-  const time = Math.floor(Number(trade.t || Date.now()) / 1000);
-  const history = [...(quote.history || []), { time, price }].slice(-180);
-
-  state.quotes.set(symbol, {
-    ...quote,
-    price,
-    change,
-    changePercent,
-    history,
-    source: "Finnhub WebSocket",
-  });
-  state.live = true;
-  state.updatedAt = new Date();
-  state.nextRefreshAt = Date.now() + 5000;
-}
-
-function scheduleRealtimeRender() {
-  if (state.realtime.renderTimer) return;
-  state.realtime.renderTimer = setTimeout(() => {
-    state.realtime.renderTimer = null;
-    render();
-  }, REALTIME_RENDER_MS);
-}
-
 async function fetchYahooNews(symbol) {
   const query = CRYPTO.has(symbol) ? SEARCH_UNIVERSE.find(([item]) => item === symbol)?.[1] || symbol : symbol;
   const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=0&newsCount=5`;
@@ -678,6 +464,14 @@ function samplePoints(points, limit) {
   return points.filter((_, index) => index % step === 0).slice(-limit);
 }
 
+function clipHistoryForRange(points, rangeKey, meta = {}) {
+  if (rangeKey !== "1d") return points;
+  const end = Number(meta.regularMarketTime || points.at(-1)?.time || Date.now() / 1000);
+  const cutoff = end - 24 * 60 * 60;
+  const clipped = points.filter((point) => Number(point.time) >= cutoff);
+  return clipped.length >= 8 ? clipped : points.slice(-160);
+}
+
 function parseCsvLine(line) {
   const values = [];
   let value = "";
@@ -703,7 +497,6 @@ function render() {
   renderMovers();
   renderCrypto();
   renderNews();
-  updateStatus();
 }
 
 function renderTabs() {
@@ -849,45 +642,6 @@ function filteredQuotes() {
   return quotes;
 }
 
-function updateStatus() {
-  const status = document.querySelector("#statusText");
-  const dot = document.querySelector("#liveDot");
-  if (!status || !dot) return;
-  dot.classList.toggle("is-off", !state.live);
-  if (state.loading) {
-    status.textContent = "Loading";
-    return;
-  }
-  if (!state.live) {
-    status.textContent = "Offline";
-    return;
-  }
-  if (state.realtime.status === "streaming") {
-    status.textContent = state.realtime.lastTickAt ? "Stream" : "Realtime";
-    return;
-  }
-  if (state.realtime.status === "connecting" || state.realtime.status === "reconnecting") {
-    status.textContent = state.realtime.status === "reconnecting" ? "Retrying" : "Connecting";
-    return;
-  }
-  if (state.realtime.status === "error") {
-    status.textContent = "Token";
-    return;
-  }
-  const seconds = Math.max(0, Math.ceil((state.nextRefreshAt - Date.now()) / 1000));
-  status.textContent = state.realtime.token ? "Connecting" : `Live ${seconds || Math.ceil(REFRESH_INTERVAL_MS / 1000)}s`;
-}
-
-function readRealtimeToken() {
-  const params = new URLSearchParams(location.search);
-  const token = params.get("finnhub") || params.get("token") || localStorage.getItem(FINNHUB_STORAGE_KEY) || "";
-  if (params.get("finnhub") || params.get("token")) {
-    localStorage.setItem(FINNHUB_STORAGE_KEY, token.trim());
-    history.replaceState(null, "", location.pathname);
-  }
-  return token.trim();
-}
-
 function closeSearch() {
   state.searchOpen = false;
   renderSearch();
@@ -921,6 +675,8 @@ function chartSvg(points, positive) {
 }
 
 function sparklineSvg(points, positive) {
+  const values = points.map((point) => Number(point.price)).filter(Number.isFinite);
+  if (values.length < 8) return "";
   const path = makePath(points, 84, 28, 2);
   if (!path.line) return "";
   return `<svg class="sparkline-svg" viewBox="0 0 84 28" preserveAspectRatio="none" aria-hidden="true"><path d="${path.line}" fill="none" stroke="${positive ? "#0a8f54" : "#d93025"}" stroke-width="1.8" stroke-linecap="round"></path></svg>`;

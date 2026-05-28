@@ -54,7 +54,7 @@ def cached_json(url: str, ttl: int = 25) -> object:
         url,
         headers={
             "Accept": "application/json,text/plain,*/*",
-            "User-Agent": "Mozilla/5.0 MarketPulse/1.0",
+            "User-Agent": "Mozilla/5.0 MKFinance/1.0",
         },
     )
     with urllib.request.urlopen(request, timeout=14) as response:
@@ -213,17 +213,15 @@ def initial_app_html() -> str:
 
     return f"""
       <header class="topbar">
-        <button class="brand" type="button" data-select-symbol="AAPL" aria-label="MarketPulse home">
+        <button class="brand" type="button" data-select-symbol="AAPL" aria-label="MK Finance home">
           <span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 13h4l2-6 4 12 3-8h5"/></svg></span>
-          <span>MarketPulse</span>
+          <span>MK Finance</span>
         </button>
         <div class="search-wrap">
           <span class="search-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg></span>
           <input id="searchInput" class="search-input" type="search" autocomplete="off" placeholder="Search" aria-label="Search stocks, ETFs, crypto" />
           <div id="searchResults" class="search-results" role="listbox"></div>
         </div>
-        <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M19 11a7 7 0 0 0-12-4l-3 3"/><path d="M5 13a7 7 0 0 0 12 4l3-3"/></svg></button>
-        <div class="live-state" aria-live="polite"><span id="liveDot" class="live-dot"></span><span id="statusText">Live</span></div>
       </header>
       <main class="page">
         <nav id="categoryTabs" class="tabs" aria-label="Market category">
@@ -271,13 +269,13 @@ def index_html() -> bytes:
     try:
         app_html = initial_app_html()
     except Exception as exc:
-        app_html = f'<main class="boot-fallback"><strong>MarketPulse</strong><span>{escape(str(exc))}</span></main>'
+        app_html = f'<main class="boot-fallback"><strong>MK Finance</strong><span>{escape(str(exc))}</span></main>'
     return f"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MarketPulse</title>
+    <title>MK Finance</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23111722'/%3E%3Cpath d='M10 35h12l5-17 10 32 7-22h10' fill='none' stroke='%2328b67a' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
     <style>{style}</style>
   </head>
@@ -562,8 +560,8 @@ def news_payload(symbol: str) -> dict[str, object]:
         return {"symbol": symbol, "news": [], "error": str(exc)}
 
 
-class MarketPulseHandler(SimpleHTTPRequestHandler):
-    server_version = "MarketPulse/1.0"
+class MKFinanceHandler(SimpleHTTPRequestHandler):
+    server_version = "MKFinance/1.0"
 
     def end_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -653,8 +651,8 @@ def main() -> None:
     port = 8000
     if len(sys.argv) > 1:
         port = int(sys.argv[1])
-    server = ThreadingHTTPServer(("127.0.0.1", port), MarketPulseHandler)
-    print(f"MarketPulse running at http://127.0.0.1:{port}")
+    server = ThreadingHTTPServer(("127.0.0.1", port), MKFinanceHandler)
+    print(f"MK Finance running at http://127.0.0.1:{port}")
     server.serve_forever()
 
 
