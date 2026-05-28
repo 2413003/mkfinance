@@ -8,7 +8,12 @@ Upload the repository and enable GitHub Pages from the repository root. The app 
 
 ## Data
 
-- Stocks, ETFs, crypto prices, charts, and news: Yahoo Finance JSON endpoints
-- Browser access: Yahoo data is fetched through the public Jina reader bridge so the static page can run without a backend
+- Default mode: Yahoo Finance JSON endpoints through the public Jina reader bridge
+- Realtime mode: click the live status in the top bar and paste a Finnhub token
+- Crypto stream symbols use Finnhub's `BINANCE:*USDT` trade feed
 
 The UI does not use bundled quote data. If live data cannot be fetched, it shows an unavailable state.
+
+GitHub Pages cannot hide a private market-data key. For immediate streaming prices, the Finnhub token is stored only in the visitor's browser local storage. Without a token, the app stays fully static and falls back to periodic public data.
+
+Finnhub WebSocket docs: https://finnhub.io/docs/api/websocket-trades

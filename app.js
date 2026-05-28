@@ -7,6 +7,10 @@ const CATEGORIES = [
   ["etfs", "ETFs"],
 ];
 const RANGES = ["1d", "5d", "1mo", "6mo", "ytd", "1y"];
+const REFRESH_INTERVAL_MS = 120000;
+const REALTIME_RECONNECT_MS = 5000;
+const REALTIME_RENDER_MS = 250;
+const FINNHUB_STORAGE_KEY = "marketpulse:finnhubToken";
 const RANGE_MAP = {
   "1d": ["1d", "5m"],
   "5d": ["5d", "15m"],
@@ -47,6 +51,16 @@ const state = {
   error: "",
   updatedAt: null,
   nextRefreshAt: 0,
+  realtime: {
+    socket: null,
+    token: readRealtimeToken(),
+    connected: false,
+    status: "off",
+    lastTickAt: null,
+    reconnectTimer: null,
+    renderTimer: null,
+    subscribed: new Set(),
+  },
   watchlist: readWatchlist(),
   searchResults: [],
   searchOpen: false,
@@ -73,7 +87,7 @@ function boot() {
         <div id="searchResults" class="search-results" role="listbox"></div>
       </div>
       <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh">${icon("refresh")}</button>
-      <div class="live-state" aria-live="polite"><span id="liveDot" class="live-dot"></span><span id="statusText">--</span></div>
+      <button id="realtimeButton" class="live-state" type="button" aria-label="Realtime settings"><span id="liveDot" class="live-dot"></span><span id="statusText">--</span></button>
     </header>
     <main class="page">
       <nav id="categoryTabs" class="tabs" aria-label="Market category"></nav>
@@ -94,7 +108,9 @@ function boot() {
   render();
   loadAll();
   setInterval(updateStatus, 1000);
-  setInterval(loadAll, 120000);
+  setInterval(() => {
+    if (!state.realtime.connected) loadAll();
+  }, REFRESH_INTERVAL_MS);
 }
 
 function bindEvents() {
@@ -105,6 +121,7 @@ function bindEvents() {
     const category = target.closest("[data-category]");
     const watch = target.closest("[data-toggle-watch]");
     const refresh = target.closest("#refreshButton");
+    const realtime = target.closest("#realtimeButton");
 
     if (select) {
       selectSymbol(select.dataset.selectSymbol);
@@ -120,6 +137,8 @@ function bindEvents() {
       toggleWatch(state.selected);
     } else if (refresh) {
       loadAll(true);
+    } else if (realtime) {
+      configureRealtime();
     } else if (!target.closest(".search-wrap")) {
       closeSearch();
     }
@@ -165,11 +184,12 @@ async function loadAll(force = false) {
     state.quotes = new Map(quotes.map((quote) => [quote.symbol, quote]));
     if (!state.quotes.has(state.selected)) state.selected = quotes[0].symbol;
     state.updatedAt = new Date();
-    state.nextRefreshAt = Date.now() + 120000;
+    state.nextRefreshAt = Date.now() + REFRESH_INTERVAL_MS;
     state.live = true;
     state.loading = false;
 
     render();
+    startRealtime();
     if (force) showToast("Updated");
   } catch (error) {
     state.live = false;
@@ -189,6 +209,7 @@ async function loadHistory(symbol, range, shouldRender = true) {
       state.quotes.set(quote.symbol, { ...state.quotes.get(quote.symbol), ...quote });
       state.selected = quote.symbol;
       state.error = "";
+      syncRealtimeSubscriptions();
     } else if (!state.quotes.has(symbol)) {
       state.error = "Live quote unavailable";
     }
@@ -237,6 +258,7 @@ function selectSymbol(symbol) {
     loadHistory(state.selected, state.range);
   }
   render();
+  startRealtime();
 }
 
 function toggleWatch(symbol) {
@@ -247,6 +269,7 @@ function toggleWatch(symbol) {
   }
   localStorage.setItem("marketpulse:watchlist", JSON.stringify(state.watchlist));
   render();
+  syncRealtimeSubscriptions();
 }
 
 async function fetchYahooChart(symbol, rangeKey = "1d") {
@@ -287,6 +310,194 @@ async function fetchYahooChart(symbol, rangeKey = "1d") {
     history: samplePoints(history, rangeKey === "1d" ? 120 : 160),
     source: "Yahoo Finance",
   };
+}
+
+function configureRealtime() {
+  const existing = state.realtime.token || "";
+  const token = window.prompt("Finnhub token for realtime streaming", existing);
+  if (token === null) return;
+  state.realtime.token = token.trim();
+  if (state.realtime.token) {
+    localStorage.setItem(FINNHUB_STORAGE_KEY, state.realtime.token);
+    startRealtime(true);
+  } else {
+    localStorage.removeItem(FINNHUB_STORAGE_KEY);
+    stopRealtime();
+    updateStatus();
+  }
+}
+
+function startRealtime(force = false) {
+  if (!state.realtime.token) {
+    stopRealtime();
+    return;
+  }
+  if (state.realtime.socket && !force) {
+    syncRealtimeSubscriptions();
+    return;
+  }
+  stopRealtime();
+  clearTimeout(state.realtime.reconnectTimer);
+  state.realtime.status = "connecting";
+  updateStatus();
+
+  const socket = new WebSocket(`wss://ws.finnhub.io?token=${encodeURIComponent(state.realtime.token)}`);
+  state.realtime.socket = socket;
+
+  socket.addEventListener("open", () => {
+    if (state.realtime.socket !== socket) return;
+    state.realtime.connected = true;
+    state.realtime.status = "streaming";
+    syncRealtimeSubscriptions();
+    updateStatus();
+    if (force) showToast("Realtime on");
+  });
+
+  socket.addEventListener("message", (event) => {
+    if (state.realtime.socket !== socket) return;
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch (error) {
+      return;
+    }
+    if (message.type === "error") {
+      state.realtime.status = "error";
+      state.realtime.connected = false;
+      state.realtime.socket = null;
+      state.realtime.subscribed.clear();
+      socket.close();
+      showToast(message.msg || "Realtime unavailable");
+      updateStatus();
+      return;
+    }
+    if (message.type !== "trade" || !Array.isArray(message.data)) return;
+    message.data.forEach(applyRealtimeTrade);
+    state.realtime.lastTickAt = new Date();
+    scheduleRealtimeRender();
+  });
+
+  socket.addEventListener("close", () => {
+    if (state.realtime.socket !== socket) return;
+    state.realtime.connected = false;
+    state.realtime.socket = null;
+    state.realtime.subscribed.clear();
+    if (state.realtime.token) {
+      state.realtime.status = "reconnecting";
+      clearTimeout(state.realtime.reconnectTimer);
+      state.realtime.reconnectTimer = setTimeout(() => startRealtime(), REALTIME_RECONNECT_MS);
+    } else {
+      state.realtime.status = "off";
+    }
+    updateStatus();
+  });
+
+  socket.addEventListener("error", () => {
+    if (state.realtime.socket !== socket) return;
+    state.realtime.connected = false;
+    state.realtime.status = "error";
+    updateStatus();
+  });
+}
+
+function stopRealtime() {
+  clearTimeout(state.realtime.reconnectTimer);
+  state.realtime.reconnectTimer = null;
+  clearTimeout(state.realtime.renderTimer);
+  state.realtime.renderTimer = null;
+  if (state.realtime.socket) {
+    const socket = state.realtime.socket;
+    state.realtime.socket = null;
+    socket.close();
+  }
+  state.realtime.connected = false;
+  state.realtime.status = "off";
+  state.realtime.subscribed.clear();
+}
+
+function syncRealtimeSubscriptions() {
+  const socket = state.realtime.socket;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  const wanted = new Set(realtimeSymbols());
+
+  state.realtime.subscribed.forEach((symbol) => {
+    if (!wanted.has(symbol)) {
+      socket.send(JSON.stringify({ type: "unsubscribe", symbol }));
+      state.realtime.subscribed.delete(symbol);
+    }
+  });
+
+  wanted.forEach((symbol) => {
+    if (!state.realtime.subscribed.has(symbol)) {
+      socket.send(JSON.stringify({ type: "subscribe", symbol }));
+      state.realtime.subscribed.add(symbol);
+    }
+  });
+}
+
+function realtimeSymbols() {
+  return [...new Set([...DEFAULT_SYMBOLS, ...state.watchlist, state.selected])]
+    .map(toFinnhubSymbol)
+    .filter(Boolean);
+}
+
+function toFinnhubSymbol(symbol) {
+  const normalized = symbol.replace("-USD", "").toUpperCase();
+  const cryptoMap = {
+    BTC: "BINANCE:BTCUSDT",
+    ETH: "BINANCE:ETHUSDT",
+    SOL: "BINANCE:SOLUSDT",
+    XRP: "BINANCE:XRPUSDT",
+    DOGE: "BINANCE:DOGEUSDT",
+    ADA: "BINANCE:ADAUSDT",
+  };
+  return cryptoMap[normalized] || normalized;
+}
+
+function fromFinnhubSymbol(symbol) {
+  const cryptoMap = {
+    "BINANCE:BTCUSDT": "BTC",
+    "BINANCE:ETHUSDT": "ETH",
+    "BINANCE:SOLUSDT": "SOL",
+    "BINANCE:XRPUSDT": "XRP",
+    "BINANCE:DOGEUSDT": "DOGE",
+    "BINANCE:ADAUSDT": "ADA",
+  };
+  return cryptoMap[symbol] || symbol;
+}
+
+function applyRealtimeTrade(trade) {
+  const symbol = fromFinnhubSymbol(String(trade.s || ""));
+  const price = Number(trade.p);
+  if (!symbol || !Number.isFinite(price) || price <= 0) return;
+
+  const quote = state.quotes.get(symbol);
+  if (!quote) return;
+  const previousClose = Number(quote.previousClose || quote.price || price);
+  const change = price - previousClose;
+  const changePercent = previousClose ? (change / previousClose) * 100 : 0;
+  const time = Math.floor(Number(trade.t || Date.now()) / 1000);
+  const history = [...(quote.history || []), { time, price }].slice(-180);
+
+  state.quotes.set(symbol, {
+    ...quote,
+    price,
+    change,
+    changePercent,
+    history,
+    source: "Finnhub WebSocket",
+  });
+  state.live = true;
+  state.updatedAt = new Date();
+  state.nextRefreshAt = Date.now() + 5000;
+}
+
+function scheduleRealtimeRender() {
+  if (state.realtime.renderTimer) return;
+  state.realtime.renderTimer = setTimeout(() => {
+    state.realtime.renderTimer = null;
+    render();
+  }, REALTIME_RENDER_MS);
 }
 
 async function fetchYahooNews(symbol) {
@@ -506,8 +717,30 @@ function updateStatus() {
     status.textContent = "Offline";
     return;
   }
+  if (state.realtime.status === "streaming") {
+    status.textContent = state.realtime.lastTickAt ? "Stream" : "Realtime";
+    return;
+  }
+  if (state.realtime.status === "connecting" || state.realtime.status === "reconnecting") {
+    status.textContent = state.realtime.status === "reconnecting" ? "Retrying" : "Connecting";
+    return;
+  }
+  if (state.realtime.status === "error") {
+    status.textContent = "Token";
+    return;
+  }
   const seconds = Math.max(0, Math.ceil((state.nextRefreshAt - Date.now()) / 1000));
-  status.textContent = `Live ${seconds || 120}s`;
+  status.textContent = state.realtime.token ? "Connecting" : `Live ${seconds || Math.ceil(REFRESH_INTERVAL_MS / 1000)}s`;
+}
+
+function readRealtimeToken() {
+  const params = new URLSearchParams(location.search);
+  const token = params.get("finnhub") || params.get("token") || localStorage.getItem(FINNHUB_STORAGE_KEY) || "";
+  if (params.get("finnhub") || params.get("token")) {
+    localStorage.setItem(FINNHUB_STORAGE_KEY, token.trim());
+    history.replaceState(null, "", location.pathname);
+  }
+  return token.trim();
 }
 
 function closeSearch() {
